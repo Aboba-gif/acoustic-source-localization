@@ -1,0 +1,24 @@
+model:
+  name: shallow_cnn
+  in_channels: 2      # комплексный вход, как в статье
+  out_channels: 1
+  base_channels: 64
+
+training:
+  batch_size: 8
+  num_epochs: 10
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  lr_patience: 3
+  lr_factor: 0.2
+  early_stop_patience: 5
+  device: cuda
+
+data:
+  train_h5: data/processed/train.h5
+  val_h5:   data/processed/val.h5
+  test_h5:  data/processed/test.h5
+
+logging:
+  log_dir: models/shallow_cnn
+  save_best_only: true

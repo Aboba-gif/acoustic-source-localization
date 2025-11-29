@@ -205,3 +205,20 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project-specific ignores
+data/processed/
+data/metadata/json/
+data/raw/
+
+models/
+results/figures/
+results/tables/
+
+# Colab / Jupyter temp
+*.ipynb_checkpoints/
+*.swp
+*.swo
+
+# VSCode workspace (если появится)
+.vscode/

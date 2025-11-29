@@ -1,0 +1,37 @@
+room:
+  Lx: 10.0
+  Ly: 8.0
+  Lz: 3.0
+  z_meas: 1.5
+
+grid:
+  nx: 256
+  ny: 256
+
+sources:
+  n_min: 1
+  n_max: 10
+  margin_xy: 0.3
+  z_min: 0.5
+  z_max: 2.5
+  types: [speech, music, machinery, impact]
+  spl_ranges:
+    speech:    [60, 90]
+    music:     [70, 100]
+    machinery: [70, 100]
+    impact:    [60, 95]
+
+acoustics:
+  c: 343.0
+  freqs: [125, 250, 500, 1000, 2000, 4000, 8000]
+  alpha: 0.0
+  floor_absorption: 0.2
+  snr_db: 40.0
+
+dataset:
+  n_train: 8000
+  n_val: 1000
+  n_test: 1000
+  h5_out_dir: data/processed
+  json_out_dir: data/metadata/json
+  source_map_sigma_m: 0.1

@@ -1,0 +1,31 @@
+data:
+  test_h5: data/processed/test.h5
+
+grid:
+  dx: 0.039
+  dy: 0.031
+
+eval:
+  distance_thresh_m: 0.2
+  peak_min_distance_px: 5
+  peak_threshold_abs_nn: 0.4      # для выходов сетей
+  peak_threshold_abs_amp: 0.4     # для сглаженной амплитуды
+
+models:
+  unet_complex:
+    ckpt_path: models/unet_complex/best.ckpt
+    in_channels: 2
+    base_channels: 64
+    input_repr: complex
+
+  shallow_cnn:
+    ckpt_path: models/shallow_cnn/best.ckpt
+    in_channels: 2
+    base_channels: 64
+    input_repr: complex
+
+  unet_magnitude:
+    ckpt_path: models/unet_magnitude/best.ckpt
+    in_channels: 1
+    base_channels: 64
+    input_repr: magnitude

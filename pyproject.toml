@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acoustic-source-localization"
+version = "0.1.0"
+description = "Acoustic source localization in a room using complex pressure maps and U-Net inversion."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Konstantin Pronin", email = "sus.sus.sus.sus90@gmail.com" },
+]
+keywords = ["acoustics", "source localization", "u-net", "machine learning"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+    "pyyaml",
+    "tqdm",
+    "pandas",
+    "scikit-learn",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "seaborn",
+    "scikit-image",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "ruff",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/Aboba-gif/acoustic-source-localization"
+Repository = "https://github.com/Aboba-gif/acoustic-source-localization"
+
+[tool.setuptools.packages.find]
+where = ["src"]
