@@ -45,10 +45,18 @@ def train_model(cfg: TrainConfig) -> Dict[str, Any]:
     val_ds = AcousticH5Dataset(cfg.val_h5, input_repr=cfg.input_repr)
 
     train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=4, pin_memory=True
+        train_ds,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=4, pin_memory=True
+        val_ds,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
     )
 
     # Model
@@ -62,7 +70,11 @@ def train_model(cfg: TrainConfig) -> Dict[str, Any]:
     criterion = nn.MSELoss()
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = ReduceLROnPlateau(
-        optimizer, mode="min", factor=cfg.lr_factor, patience=cfg.lr_patience, verbose=True
+        optimizer,
+        mode="min",
+        factor=cfg.lr_factor,
+        patience=cfg.lr_patience,
+        verbose=True,
     )
 
     log_dir = Path(cfg.log_dir)
@@ -78,7 +90,8 @@ def train_model(cfg: TrainConfig) -> Dict[str, Any]:
         model.train()
         train_loss_sum = 0.0
 
-        for x, y in tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.num_epochs} [train]"):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.num_epochs} [train]"):
+            x, y, _sample_ids = batch
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
@@ -96,7 +109,8 @@ def train_model(cfg: TrainConfig) -> Dict[str, Any]:
         model.eval()
         val_loss_sum = 0.0
         with torch.no_grad():
-            for x, y in tqdm(val_loader, desc=f"Epoch {epoch}/{cfg.num_epochs} [val]"):
+            for batch in tqdm(val_loader, desc=f"Epoch {epoch}/{cfg.num_epochs} [val]"):
+                x, y, _sample_ids = batch
                 x = x.to(device, non_blocking=True)
                 y = y.to(device, non_blocking=True)
                 y_pred = model(x)

@@ -47,8 +47,6 @@ def evaluate_smoothed_amplitude(
             mag = np.sqrt(p_real ** 2 + p_imag ** 2)
             mag = mag / (mag.max() + 1e-9)
 
-            # сглаживание тем же σ, что и в генераторе целевой карты
-            # (примерно эквивалентно, σ можно подправить)
             mag_smooth = gaussian_filter(mag, sigma=3.0)
 
             pred_peaks = peak_local_max(
@@ -65,7 +63,6 @@ def evaluate_smoothed_amplitude(
                 exclude_border=False,
             )
 
-            # match как в evaluate._match_peaks
             if pred_peaks.shape[0] == 0 and gt_peaks.shape[0] == 0:
                 continue
 

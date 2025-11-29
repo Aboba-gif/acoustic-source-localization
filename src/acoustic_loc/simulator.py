@@ -1,8 +1,8 @@
+# src/acoustic_loc/simulator.py
 import json
-import math
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Tuple, List
+from typing import Dict, Any, List, Tuple
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
@@ -11,156 +11,241 @@ from .config import FullSimConfig
 
 
 class AcousticSimulator:
+
     def __init__(self, cfg: FullSimConfig, rng: np.random.Generator | None = None):
         self.cfg = cfg
         self.rng = rng or np.random.default_rng()
 
-        self.x = np.linspace(0.0, cfg.room.Lx, cfg.grid.nx)
-        self.y = np.linspace(0.0, cfg.room.Ly, cfg.grid.ny)
-        self.xx, self.yy = np.meshgrid(self.x, self.y, indexing="xy")
+        # --- Геометрия и сетка ---
+        self.room_length = cfg.room.Lx
+        self.room_width = cfg.room.Ly
+        self.room_height = cfg.room.Lz
+        self.measurement_height = cfg.room.measurement_height or cfg.room.z_meas
 
-    # ---------- публичный API ----------
+        self.grid_x = cfg.grid.nx
+        self.grid_y = cfg.grid.ny
 
-    def generate_scene(self) -> Tuple[np.ndarray, np.ndarray, Dict]:
-        """Генерирует одну сцену: комплексное поле, source_map и метаданные."""
-        meta = self._sample_scene_metadata()
-        pressure = self._compute_pressure_field(meta)
-        pressure_noisy = self._add_noise(pressure)
+        # шаги сетки
+        self.dx = self.room_length / self.grid_x
+        self.dy = self.room_width / self.grid_y
 
-        source_map = self._build_source_map(meta)
+        x = np.linspace(0, self.room_length, self.grid_x, dtype=np.float32)
+        y = np.linspace(0, self.room_width, self.grid_y, dtype=np.float32)
+        self.X, self.Y = np.meshgrid(x, y, indexing="ij")
+        self.Z = np.ones_like(self.X) * self.measurement_height
 
-        return pressure_noisy, source_map, meta
+        # --- Акустика и микрофон ---
+        self.config_ac = cfg.acoustics
+        self.center_frequencies = list(self.config_ac.freqs)
+        self.c = self._calculate_sound_speed()
+        self.wall_absorption = self.config_ac.floor_absorption
+        self.source_map_sigma_m = self.cfg.dataset.source_map_sigma_m
 
-    # ---------- внутренние методы ----------
+        self._precompute_params()
 
-    def _sample_scene_metadata(self) -> Dict:
-        cfg = self.cfg
-        n_src = self.rng.integers(cfg.sources.n_min, cfg.sources.n_max + 1)
+    # ---------------- публичный API ----------------
 
-        freq = float(self.rng.choice(cfg.acoustics.freqs))
-        srcs: List[Dict] = []
-        for _ in range(n_src):
-            stype = self.rng.choice(cfg.sources.types)
-            spl_low, spl_high = cfg.sources.spl_ranges[stype]
-            spl = float(self.rng.uniform(spl_low, spl_high))
+    def generate_scene(self) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+        """
+        Возвращает (pressure_complex_noisy, source_map, ground_truth_dict)
+        """
+        frequency = float(self.rng.choice(self.center_frequencies))
 
-            x = float(
-                self.rng.uniform(
-                    cfg.sources.margin_xy,
-                    cfg.room.Lx - cfg.sources.margin_xy,
-                )
-            )
-            y = float(
-                self.rng.uniform(
-                    cfg.sources.margin_xy,
-                    cfg.room.Ly - cfg.sources.margin_xy,
-                )
-            )
-            z = float(self.rng.uniform(cfg.sources.z_min, cfg.sources.z_max))
+        # число источников: [n_min, n_max] включительно
+        n_sources = int(self.rng.integers(self.cfg.sources.n_min, self.cfg.sources.n_max + 1))
 
-            srcs.append(
+        sources = [self._generate_source(frequency) for _ in range(n_sources)]
+
+        pressure_clean = self._compute_pressure_field(sources, frequency)
+        pressure_noisy = self._add_noise(pressure_clean, frequency)
+        source_map = self._create_source_density_map(sources)
+
+        ground_truth = {
+            "frequency": int(frequency),
+            "sound_speed": float(self.c),
+            "sources": [
                 {
-                    "type": stype,
-                    "spl": spl,
-                    "x": x,
-                    "y": y,
-                    "z": z,
+                    "type": s["type"],
+                    "position": {
+                        "x": float(s["position"]["x"]),
+                        "y": float(s["position"]["y"]),
+                        "z": float(s["position"]["z"]),
+                    },
+                    "spl_db": float(s["spl_db"]),
                 }
-            )
-
-        meta = {
-            "freq": freq,
-            "sources": srcs,
+                for s in sources
+            ],
             "room": asdict(self.cfg.room),
             "acoustics": {
-                "c": self.cfg.acoustics.c,
-                "alpha": self.cfg.acoustics.alpha,
-                "floor_absorption": self.cfg.acoustics.floor_absorption,
+                "temperature": self.config_ac.temperature,
+                "pressure_atm": self.config_ac.pressure_atm,
+                "humidity": self.config_ac.humidity,
+                "wall_absorption": self.wall_absorption,
             },
         }
-        return meta
 
-    def _compute_pressure_field(self, meta: Dict) -> np.ndarray:
-        """Фундаментальное решение Гельмгольца + отражение от пола."""
-        freq = meta["freq"]
-        k = 2.0 * math.pi * freq / self.cfg.acoustics.c
-        alpha = self.cfg.acoustics.alpha
-        R = 1.0 - self.cfg.acoustics.floor_absorption
-        z_meas = self.cfg.room.z_meas
-
-        p = np.zeros_like(self.xx, dtype=np.complex128)
-
-        for src in meta["sources"]:
-            xs, ys, zs = src["x"], src["y"], src["z"]
-            Q = self._spl_to_amplitude(src["spl"], ref_dist=1.0)  # адаптируй под свой код
-
-            r_dir = np.sqrt((self.xx - xs) ** 2 + (self.yy - ys) ** 2 + (z_meas - zs) ** 2)
-            r_refl = np.sqrt(
-                (self.xx - xs) ** 2 + (self.yy - ys) ** 2 + (z_meas + zs) ** 2
-            )
-
-            # избегаем деления на ноль в точной позиции источника
-            r_dir = np.maximum(r_dir, 1e-4)
-            r_refl = np.maximum(r_refl, 1e-4)
-
-            term_dir = np.exp(1j * k * r_dir) * np.exp(-alpha * r_dir) / (4.0 * math.pi * r_dir)
-            term_refl = (
-                R
-                * np.exp(1j * k * r_refl)
-                * np.exp(-alpha * r_refl)
-                / (4.0 * math.pi * r_refl)
-            )
-            p += Q * (term_dir + term_refl)
-
-        return p
-
-    def _spl_to_amplitude(self, spl_db: float, ref_dist: float = 1.0) -> float:
-        """Перевод SPL в амплитуду Q. Здесь оставлена простая заглушка —
-        вставь свою формулу из ноутбука."""
-        ref_p = 2e-5  # Па
-        p_rms = ref_p * 10 ** (spl_db / 20.0)
-        # дальше можешь связать это с Q через своё нормирование.
-        return p_rms
-
-    def _add_noise(self, p: np.ndarray) -> np.ndarray:
-        snr_db = self.cfg.acoustics.snr_db
-        if snr_db is None:
-            return p
-
-        signal_power = np.mean(np.abs(p) ** 2)
-        snr_lin = 10 ** (snr_db / 10.0)
-        noise_power = signal_power / snr_lin
-        sigma = math.sqrt(noise_power / 2.0)  # комплексный шум
-
-        noise = sigma * (
-            np.random.normal(size=p.shape) + 1j * np.random.normal(size=p.shape)
-        )
-        return p + noise
-
-    def _build_source_map(self, meta: Dict) -> np.ndarray:
-        cfg = self.cfg
-        sigma_x_pix = cfg.dataset.source_map_sigma_m / (self.x[1] - self.x[0])
-        sigma_y_pix = cfg.dataset.source_map_sigma_m / (self.y[1] - self.y[0])
-
-        src_map = np.zeros_like(self.xx, dtype=np.float32)
-
-        for src in meta["sources"]:
-            j = int(round(src["x"] / (self.x[1] - self.x[0])))
-            i = int(round(src["y"] / (self.y[1] - self.y[0])))
-            i = np.clip(i, 0, cfg.grid.ny - 1)
-            j = np.clip(j, 0, cfg.grid.nx - 1)
-            src_map[i, j] = 1.0
-
-        src_map = gaussian_filter(src_map, sigma=(sigma_y_pix, sigma_x_pix))
-        if src_map.max() > 0:
-            src_map /= src_map.max()
-        return src_map.astype(np.float32)
+        return pressure_noisy, source_map, ground_truth
 
     def save_scene(
         self,
         pressure: np.ndarray,
         source_map: np.ndarray,
-        meta: Dict,
+        meta: Dict[str, Any],
         json_path: Path,
     ) -> None:
         json_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+
+    # ---------------- внутренние методы ----------------
+
+    def _calculate_sound_speed(self) -> float:
+        """
+        Как в ноутбуке:
+        T = temperature + 273.15
+        c = 331.3 * sqrt(T / 273.15)
+        """
+        T = self.config_ac.temperature + 273.15
+        return 331.3 * np.sqrt(T / 273.15)
+
+    def _precompute_params(self) -> None:
+        self.wave_numbers: Dict[float, float] = {}
+        self.absorption_coeffs: Dict[float, float] = {}
+        self.mic_frequency_response: Dict[float, float] = {}
+
+        for f in self.center_frequencies:
+            f = float(f)
+            self.wave_numbers[f] = 2.0 * np.pi * f / self.c
+            # alpha ~ (f/1000)^2
+            self.absorption_coeffs[f] = 1e-5 * (f / 1000.0) ** 2
+            # простой frequency response
+            self.mic_frequency_response[f] = 1.0 + 0.05 * np.sin(np.log10(f / 1000.0))
+
+    def _generate_source(self, frequency: float) -> Dict[str, Any]:
+        """
+        Перенос _generate_source из ноутбука:
+        - случайный тип
+        - SPL в диапазоне source_types[stype]['spl_range']
+        - случайная фаза
+        - спектр: amplitude / sqrt(f/1000)
+        """
+        # тип источника
+        stype = self.rng.choice(self.cfg.sources.types)
+        spl_low, spl_high = self.cfg.sources.spl_ranges[stype]
+        spl_db = float(self.rng.uniform(spl_low, spl_high))
+
+        margin = self.cfg.sources.margin_xy
+        x = float(self.rng.uniform(margin, self.room_length - margin))
+        y = float(self.rng.uniform(margin, self.room_width - margin))
+        z = float(self.rng.uniform(self.cfg.sources.z_min, self.cfg.sources.z_max))
+
+        p_ref = 20e-6
+        amplitude = p_ref * 10.0 ** (spl_db / 20.0)
+        phase = float(self.rng.uniform(0.0, 2.0 * np.pi))
+
+        spectrum = {f: amplitude / np.sqrt(f / 1000.0) for f in self.center_frequencies}
+
+        return {
+            "type": stype,
+            "position": {"x": x, "y": y, "z": z},
+            "amplitude": amplitude,
+            "phase": phase,
+            "spl_db": spl_db,
+            "spectrum": spectrum,
+        }
+
+    def _compute_pressure_field(self, sources: List[Dict[str, Any]], frequency: float) -> np.ndarray:
+        """
+        Поле от всех источников + отражение от пола.
+        """
+        pressure = np.zeros((self.grid_x, self.grid_y), dtype=np.complex128)
+        frequency = float(frequency)
+        k = self.wave_numbers[frequency]
+        alpha = self.absorption_coeffs[frequency]
+
+        for src in sources:
+            x_src = src["position"]["x"]
+            y_src = src["position"]["y"]
+            z_src = src["position"]["z"]
+
+            amp = src["spectrum"].get(frequency, src["amplitude"] * 0.1)
+            Q = amp * np.exp(1j * src["phase"])
+
+            # прямой путь
+            r_direct = np.sqrt(
+                (self.X - x_src) ** 2
+                + (self.Y - y_src) ** 2
+                + (self.Z - z_src) ** 2
+            )
+            r_direct = np.maximum(r_direct, 0.01)
+            G_direct = (
+                np.exp(1j * k * r_direct)
+                / (4.0 * np.pi * r_direct)
+                * np.exp(-alpha * r_direct)
+            )
+
+            # отражение от пола
+            r_floor = np.sqrt(
+                (self.X - x_src) ** 2
+                + (self.Y - y_src) ** 2
+                + (self.Z + z_src) ** 2
+            )
+            r_floor = np.maximum(r_floor, 0.01)
+            G_floor = (
+                (1.0 - self.wall_absorption)
+                * np.exp(1j * k * r_floor)
+                / (4.0 * np.pi * r_floor)
+                * np.exp(-alpha * r_floor)
+            )
+
+            pressure += Q * (G_direct + G_floor)
+
+        return pressure
+
+    def _add_noise(self, pressure_field: np.ndarray, frequency: float) -> np.ndarray:
+        """
+        Добавляет микрофонный шум и клиппинг.
+        """
+        shape = pressure_field.shape
+        p_ref = 20e-6
+
+        frequency = float(frequency)
+        noise_spl = self.config_ac.mic_self_noise + 10.0 * np.log10(
+            frequency / 1000.0
+        )
+        thermal_noise_level = p_ref * 10.0 ** (noise_spl / 20.0)
+
+        # комплексный белый шум
+        thermal_noise = thermal_noise_level * (
+            self.rng.standard_normal(size=shape)
+            + 1j * self.rng.standard_normal(size=shape)
+        ) / np.sqrt(2.0)
+
+        mic_response = self.mic_frequency_response.get(frequency, 1.0)
+        noisy_field = pressure_field * mic_response + thermal_noise
+
+        # клиппинг по максимальному SPL микрофона
+        max_pressure = p_ref * 10.0 ** (self.config_ac.mic_max_spl / 20.0)
+        np.clip(noisy_field.real, -max_pressure, max_pressure, out=noisy_field.real)
+        np.clip(noisy_field.imag, -max_pressure, max_pressure, out=noisy_field.imag)
+
+        return noisy_field
+
+    def _create_source_density_map(self, sources: List[Dict[str, Any]]) -> np.ndarray:
+        """
+        Как _create_source_density_map в ноутбуке:
+        - сетка [grid_x, grid_y], индексирование 'ij'
+        - плотность = 1 в ячейке источника, затем Gaussian с sigma в метрах/px.
+        """
+        density_map = np.zeros((self.grid_x, self.grid_y), dtype=np.float32)
+        sigma_px = self.source_map_sigma_m / self.dx
+
+        for src in sources:
+            ix = int(src["position"]["x"] / self.dx)
+            iy = int(src["position"]["y"] / self.dy)
+            if 0 <= ix < self.grid_x and 0 <= iy < self.grid_y:
+                density_map[ix, iy] = 1.0
+
+        if np.any(density_map):
+            density_map = gaussian_filter(density_map, sigma=sigma_px)
+            density_map /= density_map.max()
+
+        return density_map.astype(np.float32)

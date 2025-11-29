@@ -4,11 +4,9 @@ import torch.nn.functional as F
 
 
 class DoubleConv(nn.Module):
-    """(Conv2d -> BN -> ReLU) * 2"""
-
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.block = nn.Sequential(
+        self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
@@ -18,144 +16,158 @@ class DoubleConv(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
+        return self.double_conv(x)
 
 
-class UNet(nn.Module):
-    """U-Net из статьи: 4 уровня encoder/decoder, bilinear upsampling, skip connections."""
-
-    def __init__(
-        self,
-        in_channels: int = 2,
-        out_channels: int = 1,
-        base_channels: int = 64,
-        depth: int = 4,
-    ):
+class Down(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        assert depth == 4, "Текущая реализация заточена под depth=4"
-
-        # Encoder
-        self.enc1 = DoubleConv(in_channels, base_channels)
-        self.pool1 = nn.MaxPool2d(2)
-
-        self.enc2 = DoubleConv(base_channels, base_channels * 2)
-        self.pool2 = nn.MaxPool2d(2)
-
-        self.enc3 = DoubleConv(base_channels * 2, base_channels * 4)
-        self.pool3 = nn.MaxPool2d(2)
-
-        self.enc4 = DoubleConv(base_channels * 4, base_channels * 8)
-        self.pool4 = nn.MaxPool2d(2)
-
-        self.bottleneck = DoubleConv(base_channels * 8, base_channels * 8)
-
-        # Decoder
-        self.up4 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec4 = DoubleConv(base_channels * 8 + base_channels * 8, base_channels * 4)
-
-        self.up3 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec3 = DoubleConv(base_channels * 4 + base_channels * 4, base_channels * 2)
-
-        self.up2 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec2 = DoubleConv(base_channels * 2 + base_channels * 2, base_channels)
-
-        self.up1 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec1 = DoubleConv(base_channels + base_channels, base_channels)
-
-        self.out_conv = nn.Conv2d(base_channels, out_channels, kernel_size=1)
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Encoder
-        x1 = self.enc1(x)
-        x2 = self.enc2(self.pool1(x1))
-        x3 = self.enc3(self.pool2(x2))
-        x4 = self.enc4(self.pool3(x3))
-        xb = self.bottleneck(self.pool4(x4))
+        return self.maxpool_conv(x)
 
-        # Decoder
-        x = self.up4(xb)
-        x = torch.cat([x, x4], dim=1)
-        x = self.dec4(x)
 
-        x = self.up3(x)
-        x = torch.cat([x, x3], dim=1)
-        x = self.dec3(x)
+class Up(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
 
-        x = self.up2(x)
-        x = torch.cat([x, x2], dim=1)
-        x = self.dec2(x)
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+        self.conv = DoubleConv(in_channels, out_channels)
 
-        x = self.up1(x)
-        x = torch.cat([x, x1], dim=1)
-        x = self.dec1(x)
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+        x1 = self.up(x1)
 
-        x = self.out_conv(x)
-        x = torch.sigmoid(x)
-        return x
+        diffY = x2.size(2) - x1.size(2)
+        diffX = x2.size(3) - x1.size(3)
+        x1 = F.pad(
+            x1,
+            [
+                diffX // 2,
+                diffX - diffX // 2,
+                diffY // 2,
+                diffY - diffY // 2,
+            ],
+        )
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class AcousticUNet(nn.Module):
+    """
+    Точная копия AcousticUNet из Colab:
+    - вход: n_channels (2 для complex, 1 для magnitude)
+    - выход: n_classes=1
+    - финальный Sigmoid.
+    """
+    def __init__(self, n_channels: int = 2, n_classes: int = 1):
+        super().__init__()
+        self.inc = DoubleConv(n_channels, 64)
+        self.down1 = Down(64, 128)
+        self.down2 = Down(128, 256)
+        self.down3 = Down(256, 512)
+        self.down4 = Down(512, 512)
+        self.up1 = Up(1024, 256)
+        self.up2 = Up(512, 128)
+        self.up3 = Up(256, 64)
+        self.up4 = Up(128, 64)
+        self.outc = OutConv(64, n_classes)
+        self.final_activation = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+
+        return self.final_activation(self.outc(x))
 
 
 class ShallowCNN(nn.Module):
     """
-    Shallow encoder–decoder без skip-соединений:
-    4 даунсемплинга (Conv+BN+ReLU+MaxPool), затем 3 upsample блока.
-    В ноутбуке он даёт примерно F1=0.73 и MLE≈0.093 м.
+    Точная копия ShallowCNN из Colab:
+    - encoder: 4 блока с MaxPool
+    - decoder: 3 блока Upsample+Conv
+    - один выходной Conv+Sigmoid.
     """
-
-    def __init__(self, in_channels: int = 2, out_channels: int = 1, base_channels: int = 64):
+    def __init__(self, in_channels: int = 2, out_channels: int = 1):
         super().__init__()
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+        )
+        self.enc2 = nn.Sequential(
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+        self.enc3 = nn.Sequential(
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )
+        self.enc4 = nn.Sequential(
+            nn.MaxPool2d(2),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+        )
 
-        self.enc1 = DoubleConv(in_channels, base_channels)
-        self.pool1 = nn.MaxPool2d(2)
+        self.dec3 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )
+        self.dec2 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+        self.dec1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+        )
 
-        self.enc2 = DoubleConv(base_channels, base_channels * 2)
-        self.pool2 = nn.MaxPool2d(2)
-
-        self.enc3 = DoubleConv(base_channels * 2, base_channels * 4)
-        self.pool3 = nn.MaxPool2d(2)
-
-        self.enc4 = DoubleConv(base_channels * 4, base_channels * 8)
-        self.pool4 = nn.MaxPool2d(2)
-
-        self.bottleneck = DoubleConv(base_channels * 8, base_channels * 8)
-
-        self.up3 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec3 = DoubleConv(base_channels * 8, base_channels * 4)
-
-        self.up2 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec2 = DoubleConv(base_channels * 4, base_channels * 2)
-
-        self.up1 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec1 = DoubleConv(base_channels * 2, base_channels)
-
-        self.out_conv = nn.Conv2d(base_channels, out_channels, kernel_size=1)
+        self.out_conv = nn.Conv2d(32, out_channels, kernel_size=1)
+        self.final_activation = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.enc1(x)
-        x = self.pool1(x)
-
         x = self.enc2(x)
-        x = self.pool2(x)
-
         x = self.enc3(x)
-        x = self.pool3(x)
-
         x = self.enc4(x)
-        x = self.pool4(x)
 
-        x = self.bottleneck(x)
-
-        x = self.up3(x)
         x = self.dec3(x)
-
-        x = self.up2(x)
         x = self.dec2(x)
-
-        x = self.up1(x)
         x = self.dec1(x)
 
         x = self.out_conv(x)
-        x = torch.sigmoid(x)
-        return x
+        return self.final_activation(x)
 
 
 def build_model(
@@ -165,15 +177,13 @@ def build_model(
     base_channels: int = 64,
 ) -> nn.Module:
     """
-    Фабрика моделей, чтобы можно было конфигурировать через YAML:
-    - "unet_complex"     (2 канала: Re/Im)
-    - "unet_magnitude"   (1 канал: |p|)
-    - "shallow_cnn"
+    Фабрика моделей, совместимая с YAML-конфигами.
     """
     name = name.lower()
     if name in {"unet", "unet_complex", "unet_magnitude"}:
-        return UNet(in_channels=in_channels, out_channels=out_channels, base_channels=base_channels)
+        # n_channels = in_channels
+        return AcousticUNet(n_channels=in_channels, n_classes=out_channels)
     elif name == "shallow_cnn":
-        return ShallowCNN(in_channels=in_channels, out_channels=out_channels, base_channels=base_channels)
+        return ShallowCNN(in_channels=in_channels, out_channels=out_channels)
     else:
         raise ValueError(f"Неизвестная модель: {name}")
