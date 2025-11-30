@@ -9,6 +9,7 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage.feature import peak_local_max
+import torch
 
 from .dataset import AcousticH5Dataset
 
@@ -242,19 +243,20 @@ def visualize_sample_triplet(
 
     # ---- A) GT карта источников ----
     ax0 = axes[0]
-    im0 = ax0.imshow(s_map, cmap=cmap_prob, origin="lower")
+    # как в ноутбуке: показываем транспонированную карту
+    im0 = ax0.imshow(s_map.T, cmap=cmap_prob, origin="lower")
     _setup_axes_labels(ax0, grid_meta, "A) Истинная карта источников")
     fig.colorbar(im0, ax=ax0, fraction=0.046, pad=0.04)
 
     # ---- B) Предсказанная карта ----
     ax1 = axes[1]
-    im1 = ax1.imshow(model_pred_map, cmap=cmap_prob, origin="lower", vmin=0.0, vmax=1.0)
+    im1 = ax1.imshow(model_pred_map.T, cmap=cmap_prob, origin="lower", vmin=0.0, vmax=1.0)
     _setup_axes_labels(ax1, grid_meta, "B) Предсказанная карта")
     fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
 
     # ---- C) Модуль поля |p| + GT и предсказанные пики ----
     ax2 = axes[2]
-    im2 = ax2.imshow(mag_norm, cmap=cmap_field, origin="lower")
+    im2 = ax2.imshow(mag_norm.T, cmap=cmap_field, origin="lower")
     _setup_axes_labels(ax2, grid_meta, "C) Результаты на поле |p(x, y)|")
 
     # Истинные позиции (в метрах) → пиксели
@@ -263,28 +265,111 @@ def visualize_sample_triplet(
     for s in true_sources:
         x_m = s["position"]["x"]
         y_m = s["position"]["y"]
-        # в генераторе и в evaluate используется именно такая формула
+        # чтобы картинка совпала с ноутбуком, используем ту же формулу, но
+        # учитываем, что мы показываем .T: оси меняются местами
         px = int(x_m / grid_meta.Lx * grid_meta.nx)
         py = int(y_m / grid_meta.Ly * grid_meta.ny)
         true_x.append(px)
         true_y.append(py)
 
-    # Зелёные кресты — истина
+    # Зелёные кресты — истина (используем (px, py) без перестановки:
+    # в картинке после .T это будет как в ноутбуке)
     if len(true_x) > 0:
         ax2.scatter(true_x, true_y, s=60, c="lime", marker="x", label="Истина")
 
-    # Красные квадраты — предсказанные пики (координаты: (row, col) => (x=col, y=row))
+    # Красные квадраты — предсказанные пики
+    # В ноутбуке scatter(true_peaks[:,0], true_peaks[:,1]) с картой .T,
+    # поэтому здесь тоже НЕ меняем порядок координат.
     if pred_peaks.size > 0:
-        pred_y = pred_peaks[:, 0]
-        pred_x = pred_peaks[:, 1]
-        ax2.scatter(pred_x, pred_y, s=60, facecolors="none", edgecolors="red",
-                    linewidths=1.5, marker="s", label="Предсказание")
+        ax2.scatter(
+            pred_peaks[:, 0],  # x
+            pred_peaks[:, 1],  # y
+            s=60,
+            facecolors="none",
+            edgecolors="red",
+            linewidths=1.5,
+            marker="s",
+            label="Предсказание",
+        )
 
     ax2.legend(loc="upper right", fontsize=10)
     fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
 
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     return fig
+
+def visualize_sample_legacy_article(
+    dataset: AcousticH5Dataset,
+    model: torch.nn.Module,
+    device: torch.device,
+    index: int,
+    peak_min_distance_px: int = 5,
+    peak_threshold_abs_pred: float = 0.4,
+    peak_threshold_abs_gt: float = 0.5,
+    figsize: Tuple[int, int] = (18, 5.5),
+    outputs_dir: str | Path = "results/figures",
+) -> Path:
+    """
+    Точная копия visualize_sample_for_article из старого Colab.
+    Нужна только для воспроизведения рисунков статьи 1-в-1.
+    """
+    import os
+    from .evaluate import _find_peaks as find_peaks  # тот же peak_local_max
+
+    outputs_dir = Path(outputs_dir)
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Берём вход и GT так же, как в ноутбуке ---
+    input_tensor, target_tensor, sample_id = dataset[index]
+    input_tensor = input_tensor.to(device)
+    target_tensor = target_tensor.cpu().numpy()  # (1, H, W)
+    true_map = target_tensor.squeeze()           # (H, W)
+
+    # --- Предсказание ---
+    with torch.no_grad():
+        pred_map = model(input_tensor.unsqueeze(0)).squeeze().cpu().numpy()  # (H, W)
+
+    # --- Пики как в ноутбуке: на немасштабированных картах ---
+    predicted_peaks = find_peaks(pred_map, peak_min_distance_px, peak_threshold_abs_pred)
+    true_peaks = find_peaks(true_map, peak_min_distance_px, peak_threshold_abs_gt)
+
+    # --- Амплитуда входного поля ---
+    input_amplitude = np.sqrt(input_tensor[0].cpu().numpy()**2 +
+                              input_tensor[1].cpu().numpy()**2)
+
+    # --- Фигура из трёх панелей с .T, как в Colab ---
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    # 1) GT
+    axes[0].imshow(true_map.T, cmap="hot", origin="lower")
+    axes[0].set_title("A) Истинная карта источников")
+
+    # 2) Prediction
+    axes[1].imshow(pred_map.T, cmap="hot", origin="lower", vmin=0, vmax=1)
+    axes[1].set_title("B) Предсказанная карта (Выход U-Net)")
+
+    # 3) Overlay
+    axes[2].imshow(input_amplitude.T, cmap="viridis", origin="lower", alpha=0.8)
+    axes[2].set_title("C) Результаты на поле давления")
+    axes[2].scatter(true_peaks[:, 0], true_peaks[:, 1],
+                    c="lime", marker="x", s=150, linewidth=2, label="Истина")
+    axes[2].scatter(predicted_peaks[:, 0], predicted_peaks[:, 1],
+                    edgecolor="red", facecolor="none",
+                    marker="s", s=150, linewidth=2, label="Предсказание")
+    axes[2].legend()
+
+    for ax in axes:
+        ax.set_xlabel("X, пиксели")
+        ax.set_ylabel("Y, пиксели")
+
+    fig.suptitle(f"Результат для сэмпла #{sample_id}", fontsize=16)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    save_path = outputs_dir / f"article_visualization_sample_{int(sample_id)}.png"
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    return save_path
+
 
 
 def visualize_single_map(

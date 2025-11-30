@@ -7,7 +7,7 @@ model:
 
 training:
   batch_size: 8
-  num_epochs: 10
+  num_epochs: 4
   lr: 1.0e-4
   weight_decay: 1.0e-5
   lr_patience: 3

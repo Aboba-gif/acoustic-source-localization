@@ -18,14 +18,14 @@ models:
     base_channels: 64
     input_repr: complex
 
-  shallow_cnn:
-    ckpt_path: models/shallow_cnn/best.ckpt
-    in_channels: 2
-    base_channels: 64
-    input_repr: complex
-
-  unet_magnitude:
-    ckpt_path: models/unet_magnitude/best.ckpt
-    in_channels: 1
-    base_channels: 64
-    input_repr: magnitude
+#  shallow_cnn:
+#    ckpt_path: models/shallow_cnn/best.ckpt
+#    in_channels: 2
+#    base_channels: 64
+#    input_repr: complex
+#
+#  unet_magnitude:
+#    ckpt_path: models/unet_magnitude/best.ckpt
+#    in_channels: 1
+#    base_channels: 64
+#    input_repr: magnitude
