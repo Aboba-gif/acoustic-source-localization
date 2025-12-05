@@ -218,7 +218,7 @@ class AcousticSimulator:
             "spl_db": spl_db,
             "spectrum": spectrum,
         }
-    
+
     def _generate_image_sources(
         self,
         x_src: float,

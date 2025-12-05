@@ -1,4 +1,3 @@
-# scripts/generate_dataset.py
 import argparse
 from pathlib import Path
 

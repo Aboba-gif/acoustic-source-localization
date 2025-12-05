@@ -118,32 +118,45 @@ def _validate_predictions_with_distances(
     room_dims: Tuple[float, float],
 ) -> Tuple[Dict[str, Any], List[float]]:
     """
-    Логика строго как в старом ноутбуке:
-    - predicted_peaks_rc трактуем так же, как раньше: как массив (row, col),
-      без перестановки осей;
-    - true_sources -> пиксели через convert_real_to_pixel;
-    - расстояния считаем cdist(predicted_peaks_rc, true_peaks_px).
+    Перенос validate_predictions_with_distances из Colab.
 
-    Возвращаем:
-      - словарь с precision/recall/f1 и TP/FP/FN,
+    predicted_peaks_rc: [N_pred, 2] (row, col) в пикселях.
+    true_sources: список словарей с полями ['position']['x/y'] в метрах.
+    pixel_radius_threshold: порог расстояния в пикселях.
+    grid_dims: (grid_x, grid_y)
+    room_dims: (room_length, room_width)
+
+    Возвращает:
+      - словарь с метриками precision/recall/f1 и TP/FP/FN для сцены,
       - список расстояний (в пикселях) только для TP.
     """
     num_true = len(true_sources)
     num_pred = predicted_peaks_rc.shape[0]
 
-    # Крайние случаи — как в старом validate_predictions_with_distances
-    if num_true == 0:
+    # Крайние случаи
+    if num_true == 0 and num_pred == 0:
         metrics = {
-            "precision": 1.0 if num_pred == 0 else 0.0,
+            "precision": 1.0,
             "recall": 1.0,
-            "f1_score": 1.0 if num_pred == 0 else 0.0,
+            "f1_score": 1.0,
             "tp": 0,
-            "fp": num_pred if num_pred > 0 else 0,
+            "fp": 0,
             "fn": 0,
         }
         return metrics, []
 
-    if num_pred == 0:
+    if num_true == 0 and num_pred > 0:
+        metrics = {
+            "precision": 0.0,
+            "recall": 1.0,
+            "f1_score": 0.0,
+            "tp": 0,
+            "fp": num_pred,
+            "fn": 0,
+        }
+        return metrics, []
+
+    if num_true > 0 and num_pred == 0:
         metrics = {
             "precision": 1.0,
             "recall": 0.0,
@@ -154,35 +167,42 @@ def _validate_predictions_with_distances(
         }
         return metrics, []
 
-    # Истина в метрах -> в пиксели
+    # Истинные координаты источников в метрах -> в пиксели
     true_peaks_real = np.array(
         [[s["position"]["x"], s["position"]["y"]] for s in true_sources],
         dtype=np.float32,
     )
     true_peaks_px = np.array(
-        [_convert_real_to_pixel(tuple(c), grid_dims, room_dims)
-         for c in true_peaks_real],
+        [_convert_real_to_pixel(tuple(c), grid_dims, room_dims) for c in true_peaks_real],
         dtype=np.float32,
     )
 
-    # ВАЖНО: здесь мы НЕ меняем порядок координат predicted_peaks_rc,
-    # используем их как в старом коде: (row, col) прямо в cdist.
-    cost_matrix = cdist(predicted_peaks_rc.astype(np.float32), true_peaks_px)
+    # predicted_peaks_rc: (row, col) -> (x_px, y_px) = (col, row)
+    pred_xy = np.stack(
+        [predicted_peaks_rc[:, 1], predicted_peaks_rc[:, 0]],
+        axis=1,
+    )  # (N_pred, 2): (px_x, px_y)
+
+    # Матрица расстояний в пикселях
+    cost_matrix = cdist(pred_xy, true_peaks_px)
     pred_indices, true_indices = linear_sum_assignment(cost_matrix)
 
     distances = cost_matrix[pred_indices, true_indices]
     matched_mask = distances < pixel_radius_threshold
+
     true_positives = int(np.sum(matched_mask))
-
-    precision = true_positives / num_pred
-    recall = true_positives / num_true
-    f1_score = 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-    matched_distances_px = distances[matched_mask]
-
-    # FN/FP для совместимости с новым кодом
     false_positives = int(num_pred - true_positives)
     false_negatives = int(num_true - true_positives)
+
+    precision = true_positives / (true_positives + false_positives + 1e-9)
+    recall = true_positives / (true_positives + false_negatives + 1e-9)
+    f1_score = (
+        2.0 * (precision * recall) / (precision + recall + 1e-9)
+        if (precision + recall) > 0.0
+        else 0.0
+    )
+
+    matched_distances_px = distances[matched_mask]
 
     metrics = {
         "precision": float(precision),
@@ -193,7 +213,6 @@ def _validate_predictions_with_distances(
         "fn": false_negatives,
     }
     return metrics, matched_distances_px.tolist()
-
 
 
 # =======================
