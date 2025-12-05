@@ -25,7 +25,23 @@ acoustics:
   c: 343.0
   freqs: [125, 250, 500, 1000, 2000, 4000, 8000]
   alpha: 0.0
+
+  # базовые скалярные значения (будут переопределены, если есть concrete_absorption_freq)
   floor_absorption: 0.2
+  ceiling_absorption: 0.2
+  wall_absorption_x: 0.2
+  wall_absorption_y: 0.2
+
+  # частотно-зависимое поглощение бетона
+  concrete_absorption_freq:
+    125: 0.02
+    250: 0.02
+    500: 0.03
+    1000: 0.04
+    2000: 0.05
+    4000: 0.07
+    8000: 0.08
+
   snr_db: 40.0
 
 dataset:

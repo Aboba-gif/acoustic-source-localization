@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 
 import h5py
+import json
 import numpy as np
 import yaml
 from tqdm import tqdm
