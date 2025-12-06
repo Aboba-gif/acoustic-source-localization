@@ -28,11 +28,11 @@ class EvalConfig:
     input_repr: str          # "complex" или "magnitude"
     ckpt_path: str           # путь к чекпойнту (models/.../best.ckpt)
     test_h5: str             # путь к HDF5 с тестом
-    dx: float                # шаг сетки по x (м)
+    dx: float                # шаг сетки по x (м) -- бэкап, если нет JSON
     dy: float                # шаг сетки по y (м)
     distance_thresh_m: float # порог по расстоянию в метрах (0.2)
     peak_min_distance_px: int  # min_distance в пикселях (5)
-    peak_threshold_abs: float  # threshold_abs для peak_local_max (0.4 для NN)
+    peak_threshold_abs: float  # threshold_abs для peak_local_max (на НОРМ. карте)
     device: str              # "cuda" или "cpu"
 
 
@@ -96,10 +96,6 @@ def _convert_real_to_pixel(
 ) -> Tuple[int, int]:
     """
     Переводит координаты (x,y) в метрах в (px_x, px_y) в индексах сетки.
-
-    В Colab:
-        px = int(x / room_length * grid_x)
-        py = int(y / room_width  * grid_y)
     """
     x, y = coords
     grid_x, grid_y = grid_dims
@@ -118,16 +114,12 @@ def _validate_predictions_with_distances(
     room_dims: Tuple[float, float],
 ) -> Tuple[Dict[str, Any], List[float]]:
     """
-    Перенос validate_predictions_with_distances из Colab.
-
-    predicted_peaks_rc: [N_pred, 2] (row, col) в пикселях.
-    true_sources: список словарей с полями ['position']['x/y'] в метрах.
-    pixel_radius_threshold: порог расстояния в пикселях.
-    grid_dims: (grid_x, grid_y)
-    room_dims: (room_length, room_width)
+    Оценивает одну сцену:
+      - predicted_peaks_rc: [N_pred, 2] (row, col) в пикселях
+      - true_sources: список словарей с ['position']['x/y'] в метрах
 
     Возвращает:
-      - словарь с метриками precision/recall/f1 и TP/FP/FN для сцены,
+      - словарь с метриками для сцены,
       - список расстояний (в пикселях) только для TP.
     """
     num_true = len(true_sources)
@@ -221,15 +213,14 @@ def _validate_predictions_with_distances(
 
 def evaluate_model(cfg: EvalConfig) -> Dict[str, Any]:
     """
-    Основная функция оценки модели на тестовой выборке.
-    Повторяет логику evaluate_and_generate_results из Colab (часть с метриками),
-    но без генерации картинок — это делает scripts/evaluate_all.py.
+    Оценка модели на тестовой выборке.
 
-    Использует:
-      - предсказанные карты model(x) (Sigmoid уже внутри моделей),
-      - пики через peak_local_max на выходе сети,
-      - ground truth источники из JSON (sample_{id}_info.json),
-      - Венгерский алгоритм и порог расстояния (в пикселях) для TP/FP/FN.
+    Шаги:
+      - предсказываем карты model(x) (Sigmoid уже внутри моделей),
+      - нормируем каждую карту по максимуму (0..1),
+      - ищем пики через peak_local_max,
+      - GT-координаты берём из JSON (x,y в метрах),
+      - считаем TP/FP/FN через Венгерский алгоритм и порог по расстоянию.
     """
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     model = _load_model(cfg)
@@ -237,18 +228,30 @@ def evaluate_model(cfg: EvalConfig) -> Dict[str, Any]:
     ds = AcousticH5Dataset(cfg.test_h5, input_repr=cfg.input_repr)
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2)
 
-    # пути к JSON
+    # Пути к JSON
     h5_path = Path(cfg.test_h5)
     json_root = h5_path.parent.parent / "metadata" / "json"
 
-    # Габариты сетки и комнаты
+    # Габариты сетки
     grid_x = ds.pr_real.shape[1]
     grid_y = ds.pr_real.shape[2]
-    room_length = cfg.dx * grid_x  # dx = room_length / grid_x
-    room_width = cfg.dy * grid_y   # dy = room_width  / grid_y
 
-    dx = cfg.dx
-    pixel_radius_threshold = cfg.distance_thresh_m / dx
+    # --- Получаем реальные размеры комнаты из первого JSON ---
+    # Если по какой-то причине JSON не найдётся, fallback к cfg.dx, cfg.dy.
+    try:
+        # берём sample_id первой сцены
+        first_sid = int(ds.sample_ids[0]) if ds.sample_ids is not None else 1
+        first_info = _get_true_sources_info(first_sid, json_root)
+        room_info = first_info.get("room", {})
+        room_length = float(room_info.get("Lx", cfg.dx * grid_x))
+        room_width = float(room_info.get("Ly", cfg.dy * grid_y))
+    except Exception:
+        room_length = cfg.dx * grid_x
+        room_width = cfg.dy * grid_y
+
+    dx_eff = room_length / grid_x
+    dy_eff = room_width / grid_y
+    pixel_radius_threshold = cfg.distance_thresh_m / dx_eff
 
     scene_metrics: List[Dict[str, Any]] = []
     all_matched_distances_px: List[float] = []
@@ -265,11 +268,17 @@ def evaluate_model(cfg: EvalConfig) -> Dict[str, Any]:
             y_pred = model(x)
             prob_map = y_pred[0, 0].cpu().numpy()
 
+            # Нормировка по максимуму для стабильного порога
+            if prob_map.max() > 0:
+                prob_map_norm = prob_map / prob_map.max()
+            else:
+                prob_map_norm = prob_map
+
             # Поиск пиков на предсказанной карте
             predicted_peaks_rc = _find_peaks(
-                prob_map,
+                prob_map_norm,
                 min_distance=cfg.peak_min_distance_px,
-                threshold_abs=cfg.peak_threshold_abs,
+                threshold_abs=cfg.peak_threshold_abs,  # теперь это порог на норм. карте
             )
 
             true_info = _get_true_sources_info(sample_id, json_root)
@@ -289,18 +298,22 @@ def evaluate_model(cfg: EvalConfig) -> Dict[str, Any]:
             total_fp += metrics_i["fp"]
             total_fn += metrics_i["fn"]
 
-    # Аггрегируем метрики по всей тестовой выборке (средние по сценам)
-    precisions = [m["precision"] for m in scene_metrics]
-    recalls = [m["recall"] for m in scene_metrics]
-    f1s = [m["f1_score"] for m in scene_metrics]
+    # --- Агрегация метрик ---
+    # Микро-усреднение по суммарным TP/FP/FN
+    precision_micro = total_tp / (total_tp + total_fp + 1e-9)
+    recall_micro = total_tp / (total_tp + total_fn + 1e-9)
+    f1_micro = (
+        2.0 * precision_micro * recall_micro
+        / (precision_micro + recall_micro + 1e-9)
+    )
 
-    mean_precision = float(np.mean(precisions)) if precisions else float("nan")
-    mean_recall = float(np.mean(recalls)) if recalls else float("nan")
-    mean_f1 = float(np.mean(f1s)) if f1s else float("nan")
+    # Дополнительно можно сохранить средний F1 по сценам (не обязателен)
+    f1s = [m["f1_score"] for m in scene_metrics]
+    mean_f1_per_scene = float(np.mean(f1s)) if f1s else float("nan")
 
     all_matched_distances_px_arr = np.array(all_matched_distances_px, dtype=np.float32)
     if all_matched_distances_px_arr.size > 0:
-        all_matched_distances_m = all_matched_distances_px_arr * dx
+        all_matched_distances_m = all_matched_distances_px_arr * dx_eff
         mle_mean = float(np.mean(all_matched_distances_m))
         mle_std = float(np.std(all_matched_distances_m))
     else:
@@ -308,9 +321,10 @@ def evaluate_model(cfg: EvalConfig) -> Dict[str, Any]:
         mle_std = float("nan")
 
     metrics = {
-        "precision": mean_precision,
-        "recall": mean_recall,
-        "f1": mean_f1,
+        "precision": float(precision_micro),
+        "recall": float(recall_micro),
+        "f1": float(f1_micro),
+        "f1_mean_per_scene": mean_f1_per_scene,
         "mle_mean": mle_mean,
         "mle_std": mle_std,
         "n_scenes": len(ds),
@@ -320,8 +334,8 @@ def evaluate_model(cfg: EvalConfig) -> Dict[str, Any]:
     }
 
     print(
-        f"Precision={mean_precision:.3f}, Recall={mean_recall:.3f}, "
-        f"F1={mean_f1:.3f}, MLE={mle_mean:.3f} ± {mle_std:.3f} м, "
+        f"Precision={precision_micro:.3f}, Recall={recall_micro:.3f}, "
+        f"F1={f1_micro:.3f}, MLE={mle_mean:.3f} ± {mle_std:.3f} м, "
         f"TP={total_tp}, FP={total_fp}, FN={total_fn}"
     )
 

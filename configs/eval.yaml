@@ -6,9 +6,9 @@ grid:
   dy: 0.031
 
 eval:
-  distance_thresh_m: 0.2
-  peak_min_distance_px: 5
-  peak_threshold_abs_nn: 0.4      # для выходов сетей
+  distance_thresh_m: 0.3
+  peak_min_distance_px: 4
+  peak_threshold_abs_nn: 0.3      # для выходов сетей
   peak_threshold_abs_amp: 0.4     # для сглаженной амплитуды
 
 models:

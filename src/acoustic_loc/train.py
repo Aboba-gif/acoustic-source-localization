@@ -74,7 +74,7 @@ def train_model(cfg: TrainConfig) -> Dict[str, Any]:
         mode="min",
         factor=cfg.lr_factor,
         patience=cfg.lr_patience,
-        verbose=True,
+        # verbose=True,
     )
 
     log_dir = Path(cfg.log_dir)
