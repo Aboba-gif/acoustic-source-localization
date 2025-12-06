@@ -18,3 +18,5 @@ python scripts/train_unet_magnitude.py --config configs/unet_magnitude.yaml
 ```bash
 python scripts/evaluate_all.py --config configs/eval.yaml
 ```
+
+A complete pipeline was developed and tested in a [Google Colab notebook](https://colab.research.google.com/drive/1eDi8aRDEs-BNCxme_IZGul2nBNvr_nZg?usp=sharing) notebook, which can be used for experimentation and reproduction.
